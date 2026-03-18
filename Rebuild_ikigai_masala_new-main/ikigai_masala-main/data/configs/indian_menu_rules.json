@@ -1,0 +1,14 @@
+{
+  "client_id": "indian_lunch_provider",
+  "description": "Menu rules for Indian lunch menu planning",
+  "rules": [
+    {
+      "name": "chinese_monday",
+      "type": "cuisine",
+      "enabled": true,
+      "cuisine_family": "chinese",
+      "days_of_week": ["monday"],
+      "description": "Chinese cuisine on Monday with smart fallback"
+    }
+  ]
+}
