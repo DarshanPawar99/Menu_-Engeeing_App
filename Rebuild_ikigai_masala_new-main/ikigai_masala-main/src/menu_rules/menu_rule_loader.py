@@ -3,8 +3,11 @@ Menu rule loader from JSON configuration.
 """
 
 import json
+import logging
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+
+logger = logging.getLogger(__name__)
 
 from .base_menu_rule import BaseMenuRule, MenuRuleType
 from .cuisine_menu_rule import CuisineMenuRule
@@ -39,7 +42,7 @@ class MenuRuleLoader:
         'theme_fallback_penalty': ThemeFallbackPenaltyRule,
     }
 
-    def __init__(self, config_path: str = None):
+    def __init__(self, config_path: Optional[str] = None):
         self.config_path = Path(config_path) if config_path else None
         self.rules = []
 
@@ -61,13 +64,13 @@ class MenuRuleLoader:
                 if rule and rule.validate_config():
                     self.rules.append(rule)
                 else:
-                    print(f"Warning: Invalid rule config: {rule_config.get('name')}")
-            except Exception as e:
-                print(f"Error creating rule: {e}")
-        print(f"Loaded {len(self.rules)} menu rule(s)")
+                    logger.warning("Invalid rule config: %s", rule_config.get('name'))
+            except (ValueError, KeyError, TypeError) as e:
+                logger.warning("Error creating rule: %s", e)
+        logger.info("Loaded %d menu rule(s)", len(self.rules))
         return self.rules
 
-    def _create_rule(self, rule_config: Dict[str, Any]) -> BaseMenuRule:
+    def _create_rule(self, rule_config: Dict[str, Any]) -> Optional[BaseMenuRule]:
         rule_type = rule_config.get('type', '').lower()
         if rule_type not in self.RULE_CLASSES:
             raise ValueError(f"Unknown rule type: {rule_type}")

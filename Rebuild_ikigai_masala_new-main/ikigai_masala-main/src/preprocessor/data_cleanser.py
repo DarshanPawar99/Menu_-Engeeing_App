@@ -5,8 +5,11 @@ Handles deduplication, missing values, and text standardization
 for the full Ontology schema (including flag columns).
 """
 
+import logging
+
 import pandas as pd
-from typing import Dict, Any
+
+logger = logging.getLogger(__name__)
 
 
 class DataCleanser:
@@ -34,7 +37,7 @@ class DataCleanser:
         df = df.drop_duplicates(subset=[dedup_col], keep='first')
         removed = initial_count - len(df)
         if removed > 0:
-            print(f"  Removed {removed} duplicate items")
+            logger.info("Removed %d duplicate items", removed)
 
         # 2. Fill missing text fields
         for col in ('item', 'item_name', 'course_type', 'cuisine_family', 'item_color',
@@ -54,5 +57,5 @@ class DataCleanser:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0).astype(int)
 
         self.cleaned_data = df
-        print(f"  Cleaned data: {len(df)} items ready")
+        logger.info("Cleaned data: %d items ready", len(df))
         return df
