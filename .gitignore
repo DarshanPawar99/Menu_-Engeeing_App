@@ -6,5 +6,11 @@ __pycache__/
 dist/
 build/
 .env
+.venv/
+venv/
 *.xlsx~
 ~$*
+*.pkl
+*.log
+.DS_Store
+node_modules/

@@ -134,7 +134,7 @@ Examples:
         print("\nMenu planning completed successfully!")
         return 0
 
-    except Exception as e:
+    except (RuntimeError, ValueError, FileNotFoundError, OSError) as e:
         print(f"\nError: {e}")
         traceback.print_exc()
         return 1

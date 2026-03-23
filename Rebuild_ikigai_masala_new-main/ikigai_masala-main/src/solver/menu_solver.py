@@ -8,9 +8,12 @@ The solver creates one boolean variable per candidate per cell and selects exact
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import random
 from dataclasses import dataclass, field
-from typing import Dict, List, Any, Optional, Set, Tuple
+from typing import Dict, List, Any, Optional, Set, Tuple, Sequence
+
+logger = logging.getLogger(__name__)
 
 import pandas as pd
 from ortools.sat.python import cp_model
@@ -23,20 +26,45 @@ from ..preprocessor.pool_builder import (
     _base_slot, _slot_num, _expand_slots_in_order,
 )
 from ..preprocessor.column_mapper import _norm_str, _norm_color, _to_bool01, _is_nonveg_dry_row
+from .solver_context import SolverContext
 
 
 # ---------------------------------------------------------------------------
 # Config dataclass (runtime solver configuration)
 # ---------------------------------------------------------------------------
 
+# Default candidate pool caps per base slot (used in multi-restart strategy)
+DEFAULT_CAP_BY_SLOT: Dict[str, int] = {
+    'rice': 1600, 'healthy_rice': 1200, 'veg_gravy': 1400,
+    'nonveg_main': 1400, 'curd_side': 1400, 'veg_dry': 1100,
+    'bread': 1100, 'starter': 1200, 'soup': 900, 'salad': 900,
+    'dal': 1000, 'dessert': 1000, 'welcome_drink': 1000,
+    'sambar': 900, 'rasam': 900,
+}
+DEFAULT_CAP = 900  # fallback for slots not in DEFAULT_CAP_BY_SLOT
+
+# Multi-restart strategy defaults
+DEFAULT_CAP_MULTIPLIERS = (1, 2)  # try 1x then 2x candidate pool sizes
+DEFAULT_RESTARTS_PER_MULTIPLIER = 4  # attempts per multiplier
+DEFAULT_SEED_MULT_FACTOR = 1000  # seed formula: base + mult * FACTOR + restart * 17
+DEFAULT_SEED_RESTART_STEP = 17
+
+# Penalty/bonus weights
+THEME_FALLBACK_PENALTY = 2_000_000  # penalty for non-theme items when theme available
+THEME_STARTER_PREFERENCE_BONUS = 1_000_000  # bonus for theme-matching starters
+REGEN_SIMILARITY_PENALTY = -10_000  # penalty for re-selecting old items during regen
+REGEN_CAP_MULTIPLIER = 1.5  # candidate cap multiplier for regeneration
+
+
 @dataclass
 class SolverConfig:
+    """Runtime configuration for the CP-SAT menu solver."""
     days: int = 5
     start_date: dt.date = field(default_factory=dt.date.today)
     seed: int = 7
     time_limit_sec: int = 240
-    max_attempts: int = 500000
     slot_counts: Optional[Dict[str, int]] = None
+    # Color constraints
     color_col: str = 'item_color'
     color_slots: List[str] = field(default_factory=lambda: [
         'starter', 'rice', 'veg_gravy', 'veg_dry', 'nonveg_main', 'dal', 'dessert',
@@ -46,17 +74,21 @@ class SolverConfig:
     min_distinct_colors_per_day_biryani: int = 4
     max_same_color_per_day: int = 2
     ignore_rice_gravy_color_diff_on_chinese_day: bool = True
+    # Premium item constraints
     premium_flag_col: Optional[str] = None
     premium_min_per_horizon: int = 1
     premium_max_per_horizon: int = 2
     premium_max_per_day: int = 1
+    # Rice exclusions
     rice_exclude_items: Set[str] = field(default_factory=lambda: {
         'steamed_rice', 'steamed rice', 'white_rice', 'white rice',
         'steam rice', 'plain rice', 'plain_rice',
     })
+    # Cuisine theme settings
     cuisine_col: str = 'cuisine_family'
     cuisine_south_value: str = 'south_indian'
     cuisine_north_value: str = 'north_indian'
+    # Flag column names for theme filtering
     f_chinese_rice: Optional[str] = 'is_chinese_fried_rice'
     f_chinese_nonveg: Optional[str] = 'is_chinese_chicken_gravy'
     f_chinese_veg_gravy: Optional[str] = 'is_chinese_veg_gravy'
@@ -64,8 +96,14 @@ class SolverConfig:
     f_nonveg_biryani: Optional[str] = 'is_nonveg_biryani'
     f_veg_biryani: Optional[str] = 'is_mixedveg_biryani'
     f_raita: Optional[str] = 'is_raita'
+    # Theme preferences
     prefer_theme_starter: bool = True
-    theme_fallback_penalty: int = 2000000
+    theme_fallback_penalty: int = THEME_FALLBACK_PENALTY
+    # Solver strategy
+    cap_by_slot: Dict[str, int] = field(default_factory=lambda: dict(DEFAULT_CAP_BY_SLOT))
+    cap_default: int = DEFAULT_CAP
+    cap_multipliers: Tuple[int, ...] = DEFAULT_CAP_MULTIPLIERS
+    restarts_per_multiplier: int = DEFAULT_RESTARTS_PER_MULTIPLIER
     deterministic: bool = True
 
 
@@ -171,15 +209,9 @@ class MenuSolver:
     picks exactly one candidate per cell subject to hard constraints.
     """
 
-    # Default candidate caps per base slot
-    CAP_BY_SLOT_BASE: Dict[str, int] = {
-        'rice': 1600, 'healthy_rice': 1200, 'veg_gravy': 1400,
-        'nonveg_main': 1400, 'curd_side': 1400, 'veg_dry': 1100,
-        'bread': 1100, 'starter': 1200, 'soup': 900, 'salad': 900,
-        'dal': 1000, 'dessert': 1000, 'welcome_drink': 1000,
-        'sambar': 900, 'rasam': 900,
-    }
-    CAP_DEFAULT_BASE = 900
+    # Legacy class attrs kept for external references (e.g. regenerator)
+    CAP_BY_SLOT_BASE: Dict[str, int] = dict(DEFAULT_CAP_BY_SLOT)
+    CAP_DEFAULT_BASE: int = DEFAULT_CAP
 
     def __init__(
         self,
@@ -209,21 +241,21 @@ class MenuSolver:
             BASE_SLOT_NAMES, self.cfg.slot_counts or {s: 1 for s in BASE_SLOT_NAMES}
         )
 
-        cap_multipliers = [1, 2]
-        restarts_per_multiplier = 4
+        cap_multipliers = self.cfg.cap_multipliers
+        restarts_per_mult = self.cfg.restarts_per_multiplier
         base_seed = int(self.cfg.seed)
         total_time = float(self.cfg.time_limit_sec)
-        per_attempt_time = max(20.0, total_time / (len(cap_multipliers) * restarts_per_multiplier))
+        per_attempt_time = max(20.0, total_time / (len(cap_multipliers) * restarts_per_mult))
         last_err = None
         orig_seed, orig_time = self.cfg.seed, self.cfg.time_limit_sec
 
         try:
             for mult in cap_multipliers:
-                cap_default = self.CAP_DEFAULT_BASE * mult
-                cap_by_slot = {k: v * mult for k, v in self.CAP_BY_SLOT_BASE.items()}
+                cap_default = self.cfg.cap_default * mult
+                cap_by_slot = {k: v * mult for k, v in self.cfg.cap_by_slot.items()}
 
-                for r in range(restarts_per_multiplier):
-                    attempt_seed = base_seed + mult * 1000 + r * 17
+                for r in range(restarts_per_mult):
+                    attempt_seed = base_seed + mult * DEFAULT_SEED_MULT_FACTOR + r * DEFAULT_SEED_RESTART_STEP
                     rng = random.Random(attempt_seed)
                     self.cfg.seed = attempt_seed
                     self.cfg.time_limit_sec = int(per_attempt_time)
@@ -240,7 +272,7 @@ class MenuSolver:
                             chosen_rows, dates, expanded_slots
                         )
                         return week_plan, dates
-                    except Exception as e:
+                    except RuntimeError as e:
                         last_err = e
                         continue
 
@@ -363,27 +395,28 @@ class MenuSolver:
          day_gravy_color_vars, day_premium_vars, day_welcome_color_vars,
          monday_south_lits, monday_north_lits, theme_fallback_bools) = build_result
 
-        # Build rule context
-        context = {
-            'cells': cells,
-            'dates': dates,
-            'day_types': day_types,
-            'item_to_vars': item_to_vars,
-            'day_color_vars': day_color_vars,
-            'day_rice_color_vars': day_rice_color_vars,
-            'day_gravy_color_vars': day_gravy_color_vars,
-            'day_premium_vars': day_premium_vars,
-            'day_welcome_color_vars': day_welcome_color_vars,
-            'monday_south_lits': monday_south_lits,
-            'monday_north_lits': monday_north_lits,
-            'theme_fallback_bools': theme_fallback_bools,
-            'known_colors': known_colors,
-            'known_welcome_colors': known_welcome_colors,
-            'cfg': self.cfg,
-            'recent_sigs': self.recent_sigs,
-            'find_cells_fn': _find_cells,
-            'link_any_fn': _link_any,
-        }
+        # Build rule context (typed dataclass, passed as dict for backward compat)
+        solver_ctx = SolverContext(
+            cells=cells,
+            dates=dates,
+            day_types=day_types,
+            item_to_vars=item_to_vars,
+            day_color_vars=day_color_vars,
+            day_rice_color_vars=day_rice_color_vars,
+            day_gravy_color_vars=day_gravy_color_vars,
+            day_premium_vars=day_premium_vars,
+            day_welcome_color_vars=day_welcome_color_vars,
+            monday_south_lits=monday_south_lits,
+            monday_north_lits=monday_north_lits,
+            theme_fallback_bools=theme_fallback_bools,
+            known_colors=known_colors,
+            known_welcome_colors=known_welcome_colors,
+            cfg=self.cfg,
+            recent_sigs=self.recent_sigs,
+            find_cells_fn=_find_cells,
+            link_any_fn=_link_any,
+        )
+        context = solver_ctx.as_dict()
 
         # Apply built-in constraints
         self._add_item_uniqueness(model, item_to_vars)
@@ -395,8 +428,8 @@ class MenuSolver:
         for rule in self.menu_rules:
             try:
                 rule.apply(model, {}, None, context)
-            except Exception as e:
-                print(f"Warning: rule {rule.name} failed: {e}")
+            except (ValueError, KeyError, AttributeError) as e:
+                logger.warning("Rule %s failed: %s", rule.name, e)
 
         # Build objective
         self._build_objective(model, cells, rng, similarity,
@@ -587,8 +620,8 @@ class MenuSolver:
             try:
                 terms = rule.get_objective_terms(model, context)
                 obj_terms.extend(terms)
-            except Exception:
-                pass
+            except (ValueError, KeyError, AttributeError):
+                logger.warning("Rule %s objective terms failed", getattr(rule, 'name', '?'))
 
         if theme_fallback_bools:
             obj_terms.append(sum(theme_fallback_bools) * (-abs(int(self.cfg.theme_fallback_penalty))))

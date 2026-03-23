@@ -13,7 +13,7 @@ from typing import Dict, List, Optional, Set, Tuple
 import pandas as pd
 
 from ._helpers import strip_color_suffix as _strip_color_suffix
-from .menu_solver import MenuSolver, SolverConfig
+from .menu_solver import MenuSolver, SolverConfig, REGEN_CAP_MULTIPLIER, REGEN_SIMILARITY_PENALTY
 from ..preprocessor.column_mapper import _norm_str, _norm_color
 
 
@@ -110,7 +110,7 @@ class MenuRegenerator:
                 by_item[it] = row
 
         # Create solver with higher caps for regeneration
-        regen_caps = {k: int(v * 1.5) for k, v in MenuSolver.CAP_BY_SLOT_BASE.items()}
+        regen_caps = {k: int(v * REGEN_CAP_MULTIPLIER) for k, v in MenuSolver.CAP_BY_SLOT_BASE.items()}
         solver = MenuSolver(
             pools=self.pools,
             solver_config=self.cfg,
@@ -127,16 +127,16 @@ class MenuRegenerator:
         # First attempt: with forbidden (hard block old items)
         try:
             return solver.solve(locked=locked, forbidden=forbidden, similarity=None)
-        except Exception:
+        except RuntimeError:
             pass
 
         # Fallback: allow old items but penalize them heavily
         similarity_penalties = {}
         for (d, slot_id), old_items in forbidden.items():
             for old_item in old_items:
-                similarity_penalties[d, slot_id, old_item] = -10000
+                similarity_penalties[d, slot_id, old_item] = REGEN_SIMILARITY_PENALTY
 
         try:
             return solver.solve(locked=locked, forbidden=None, similarity=similarity_penalties)
-        except Exception as e:
+        except RuntimeError as e:
             raise RuntimeError(f'Regeneration failed: {e}') from e
