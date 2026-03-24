@@ -11,18 +11,18 @@ import datetime as dt
 import logging
 import random
 from dataclasses import dataclass, field
-from typing import Dict, List, Any, Optional, Set, Tuple, Sequence
+from typing import Dict, List, Any, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
 import pandas as pd
 from ortools.sat.python import cp_model
 
-from ._helpers import weekday_type as _weekday_type, theme_label as _theme_label, strip_color_suffix as _strip_color_suffix
+from ._helpers import weekday_type as _weekday_type
 from ..menu_rules.base_menu_rule import BaseMenuRule
 from ..preprocessor.pool_builder import (
-    BASE_SLOT_NAMES, CONST_SLOTS, CONSTANT_ITEMS, EXEMPT_FROM_CUISINE,
-    REPEATABLE_ITEM_BASES, THEME_FALLBACK_SLOTS, SLOT_SUFFIX_SEP,
+    BASE_SLOT_NAMES, CONSTANT_ITEMS, EXEMPT_FROM_CUISINE,
+    THEME_FALLBACK_SLOTS, SLOT_SUFFIX_SEP,
     _base_slot, _slot_num, _expand_slots_in_order,
 )
 from ..preprocessor.column_mapper import _norm_str, _norm_color, _to_bool01
@@ -410,8 +410,7 @@ class MenuSolver:
         )
         context = solver_ctx.as_dict()
 
-        # Apply built-in constraints
-        self._add_item_uniqueness(model, item_to_vars)
+        # Apply built-in color constraints (uniqueness is handled by UniqueItemsMenuRule)
         self._add_color_constraints(model, dates, day_types, known_colors,
                                     day_color_vars, day_rice_color_vars,
                                     day_gravy_color_vars)
@@ -547,12 +546,6 @@ class MenuSolver:
                 monday_south_lits, monday_north_lits, theme_fallback_bools)
 
     # ----- Built-in constraints -----
-
-    def _add_item_uniqueness(self, model, item_to_vars):
-        repeatable = set(REPEATABLE_ITEM_BASES)
-        for item_base, vars_ in item_to_vars.items():
-            if item_base not in repeatable:
-                model.Add(sum(vars_) <= 1)
 
     def _add_color_constraints(self, model, dates, day_types, known_colors,
                                day_color_vars, day_rice_color_vars,
