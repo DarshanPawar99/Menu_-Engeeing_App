@@ -25,7 +25,7 @@ from ..preprocessor.pool_builder import (
     REPEATABLE_ITEM_BASES, THEME_FALLBACK_SLOTS, SLOT_SUFFIX_SEP,
     _base_slot, _slot_num, _expand_slots_in_order,
 )
-from ..preprocessor.column_mapper import _norm_str, _norm_color, _to_bool01, _is_nonveg_dry_row
+from ..preprocessor.column_mapper import _norm_str, _norm_color, _to_bool01
 from .solver_context import SolverContext
 
 
@@ -295,18 +295,12 @@ class MenuSolver:
         base_slots = list(dict.fromkeys(_base_slot(s) for s in expanded_slots))
 
         # Pre-build per (day_idx, base_slot) pool cache
-        cache = self._build_day_base_pool_cache(dates, base_slots)
+        cache = self._build_day_base_pool_cache(dates, base_slots, expanded_slots)
 
         for di, d in enumerate(dates):
             for slot_id in expanded_slots:
                 base = _base_slot(slot_id)
-                pool2, pref_mask, day_type = cache[di, base]
-
-                # Nonveg dry preference for slot 2+
-                if base == 'nonveg_main' and (_slot_num(slot_id) or 1) >= 2:
-                    pool2 = self._apply_nonveg_dry_preference(
-                        pool2, day_type, self.banned_by_date.get(d, set())
-                    )
+                pool2, pref_mask, day_type = cache[di, slot_id]
 
                 if len(pool2) == 0:
                     extra = ''
@@ -325,11 +319,23 @@ class MenuSolver:
 
     def _build_day_base_pool_cache(
         self, dates: List[dt.date], base_slots: List[str],
+        expanded_slots: List[str],
     ) -> Dict:
         cache = {}
+
+        # Build shared filter context for rule pre_filter_pool calls
+        base_filter_ctx: Dict[str, Any] = {
+            'cfg': self.cfg,
+            'banned_by_date': self.banned_by_date,
+            'ricebread_ban_day': self.ricebread_ban_day,
+            'pools': self.pools,
+        }
+
         for di, d in enumerate(dates):
             day_type = _weekday_type(d)
-            banned = self.banned_by_date.get(d, set())
+
+            # First pass: build base-slot level pools (shared across slot numbers)
+            base_pools: Dict[str, pd.DataFrame] = {}
             for base in base_slots:
                 pool2 = self.pools[base].copy()
 
@@ -337,45 +343,31 @@ class MenuSolver:
                 if base in ('rice', 'healthy_rice') and len(pool2) > 0:
                     pool2 = pool2[~pool2['item'].isin(self.cfg.rice_exclude_items)]
 
-                # Rice-bread ban
-                if base == 'bread' and self.ricebread_ban_day.get(d, False):
-                    if 'is_rice_bread' in pool2.columns:
-                        pool2 = pool2[pool2['is_rice_bread'] == 0]
+                # Apply rule pre-filters (item cooldown, ricebread gap,
+                # theme slot filters, etc.)
+                filter_ctx = {**base_filter_ctx, 'slot_num': None}
+                for rule in self.menu_rules:
+                    pool2 = rule.pre_filter_pool(pool2, d, base, day_type, filter_ctx)
 
-                # Banned items removal
-                if banned:
-                    pool2 = pool2[~pool2['item'].isin(banned)]
+                base_pools[base] = pool2
+
+            # Second pass: per expanded slot (handles slot_num for nonveg_dry etc.)
+            for slot_id in expanded_slots:
+                base = _base_slot(slot_id)
+                slot_num = _slot_num(slot_id)
+                pool2 = base_pools[base]
+
+                # Apply slot-number-aware pre-filters (e.g. nonveg dry preference)
+                if slot_num is not None and slot_num >= 2:
+                    filter_ctx = {**base_filter_ctx, 'slot_num': slot_num}
+                    for rule in self.menu_rules:
+                        pool2 = rule.pre_filter_pool(pool2, d, base, day_type, filter_ctx)
 
                 # Theme preference mask (for sampling priority)
                 pref_mask = pd.Series(False, index=pool2.index)
 
-                cache[di, base] = (pool2, pref_mask, day_type)
+                cache[di, slot_id] = (pool2, pref_mask, day_type)
         return cache
-
-    def _apply_nonveg_dry_preference(
-        self, pool: pd.DataFrame, day_type: str, banned: Set[str],
-    ) -> pd.DataFrame:
-        """For nonveg_main slot 2+: prefer dry items, fallback to gravy."""
-        if day_type in ('biryani', 'chinese'):
-            alt_pool = self.pools['nonveg_main'].copy()
-            if self.cfg.f_chinese_nonveg and self.cfg.f_chinese_nonveg in alt_pool.columns:
-                alt_pool = alt_pool[alt_pool[self.cfg.f_chinese_nonveg].map(_to_bool01) == 0]
-            bflag = self.cfg.f_nonveg_biryani
-            if bflag and bflag in alt_pool.columns:
-                alt_pool = alt_pool[alt_pool[bflag].map(_to_bool01) == 0]
-            if banned:
-                alt_pool = alt_pool[~alt_pool['item'].isin(banned)]
-            if len(alt_pool) > 0:
-                pool = alt_pool
-
-        dry_pool = pool[pool.apply(_is_nonveg_dry_row, axis=1)]
-        if len(dry_pool) > 0:
-            return dry_pool
-        if 'is_nonveg_gravy' in pool.columns:
-            gravy_pool = pool[pool['is_nonveg_gravy'].map(_to_bool01) == 1]
-            if len(gravy_pool) > 0:
-                return gravy_pool
-        return pool
 
     # ----- CP-SAT model -----
 
