@@ -161,6 +161,9 @@ def plan_menu():
     except (FileNotFoundError, OSError) as e:
         logger.error("Data loading error: %s", e, exc_info=True)
         return jsonify({'success': False, 'error': str(e)}), 500
+    except Exception as e:
+        logger.error("Unexpected error in plan: %s", e, exc_info=True)
+        return jsonify({'success': False, 'error': f'{type(e).__name__}: {e}'}), 500
 
 
 @app.route('/api/v1/regenerate', methods=['POST'])
@@ -235,6 +238,9 @@ def regenerate_cells():
     except (FileNotFoundError, OSError) as e:
         logger.error("Data loading error: %s", e, exc_info=True)
         return jsonify({'success': False, 'error': str(e)}), 500
+    except Exception as e:
+        logger.error("Unexpected error in regenerate: %s", e, exc_info=True)
+        return jsonify({'success': False, 'error': f'{type(e).__name__}: {e}'}), 500
 
 
 @app.route('/api/v1/save', methods=['POST'])

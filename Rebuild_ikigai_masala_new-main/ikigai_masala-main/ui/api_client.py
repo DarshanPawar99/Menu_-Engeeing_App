@@ -42,10 +42,9 @@ class MenuApiClient:
         resp = self.session.post(
             f"{self.base_url}/api/v1/plan", json=payload, timeout=time_limit_seconds + 30
         )
-        resp.raise_for_status()
-        data = resp.json()
-        if not data.get("success"):
-            raise RuntimeError(data.get("error", "Solver failed"))
+        data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+        if not resp.ok or not data.get("success"):
+            raise RuntimeError(data.get("error", f"Server error {resp.status_code}"))
         return data
 
     def regenerate(
@@ -69,10 +68,9 @@ class MenuApiClient:
         resp = self.session.post(
             f"{self.base_url}/api/v1/regenerate", json=payload, timeout=time_limit_seconds + 30
         )
-        resp.raise_for_status()
-        data = resp.json()
-        if not data.get("success"):
-            raise RuntimeError(data.get("error", "Regeneration failed"))
+        data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+        if not resp.ok or not data.get("success"):
+            raise RuntimeError(data.get("error", f"Server error {resp.status_code}"))
         return data
 
     def save(
