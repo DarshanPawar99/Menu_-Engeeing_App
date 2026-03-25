@@ -1,5 +1,5 @@
 """
-Client Editor — Create new clients or edit/delete existing ones.
+Client Editor — Create new clients or select existing ones.
 """
 
 from __future__ import annotations
@@ -38,31 +38,6 @@ def render_client_editor(api: MenuApiClient, metadata: dict) -> Optional[str]:
             key="editor_client_select",
             label_visibility="collapsed",
         )
-
-        col1, col2 = st.columns([3, 1])
-        with col2:
-            if st.button("Delete", key="editor_delete_client",
-                         use_container_width=True, type="secondary"):
-                st.session_state['editor_confirm_delete'] = True
-
-        if st.session_state.editor_confirm_delete:
-            st.warning(f"Delete **{selected}**? This cannot be undone.")
-            c1, c2, _ = st.columns([1, 1, 2])
-            with c1:
-                if st.button("Confirm Delete", type="primary", key="editor_confirm_del_btn"):
-                    try:
-                        api.delete_client(selected)
-                        st.session_state.editor_confirm_delete = False
-                        st.session_state.pop('editor_client_select', None)
-                        st.toast(f"Deleted {selected}", icon="✓")
-                        st.rerun()
-                    except Exception as e:
-                        st.error(f"Delete failed: {e}")
-            with c2:
-                if st.button("Cancel", key="editor_cancel_del_btn"):
-                    st.session_state.editor_confirm_delete = False
-                    st.rerun()
-
         return selected
 
     with tab_create:

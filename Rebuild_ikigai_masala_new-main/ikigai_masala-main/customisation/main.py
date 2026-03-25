@@ -2,10 +2,12 @@
 Customisation Editor — Main page that orchestrates all 4 editor sections.
 
 Sections:
-  1. Client Management (create / select / delete)
+  1. Client Management (create / select)
   2. Slot Customization (toggle base slots)
   3. Multi-Slot Configuration (slot count overrides)
   4. Day-wise Theme Overrides
+
+Action bar at the bottom: Save | Reset | Delete
 
 Called from app.py when st.session_state.view == "editor".
 """
@@ -121,58 +123,103 @@ def render_customisation_editor(api: MenuApiClient):
         st.markdown('</div>', unsafe_allow_html=True)
 
     # ============================================================
-    # Save bar
+    # Action bar: Save | Reset | Delete
     # ============================================================
     st.markdown("")
     st.divider()
 
-    col_save, col_status = st.columns([1, 3])
+    # Unsaved changes indicator
+    changes = []
+    if set(new_active_slots) != set(current_active):
+        changes.append("slots")
+    count_changes = {k: v for k, v in new_slot_counts.items()
+                     if v != current_counts.get(k, 1) and k in new_active_slots}
+    if count_changes:
+        changes.append("multi-slots")
+    theme_changes = {k: v for k, v in new_theme_map.items()
+                     if v != current_theme.get(k)}
+    if theme_changes:
+        changes.append("themes")
+
+    if changes:
+        st.markdown(
+            f'<p style="color:#fdba74;font-size:0.82rem;margin:0 0 0.5rem;">'
+            f'Unsaved changes: {", ".join(changes)}</p>',
+            unsafe_allow_html=True,
+        )
+
+    # --- Three action buttons in one row ---
+    col_save, col_reset, col_delete = st.columns(3)
+
     with col_save:
         save_clicked = st.button(
-            "Save All Changes",
+            "Save",
             type="primary",
             key="editor_save_all",
             use_container_width=True,
         )
-    with col_status:
-        # Show change summary
-        changes = []
-        if set(new_active_slots) != set(current_active):
-            changes.append("slots")
-        count_changes = {k: v for k, v in new_slot_counts.items()
-                         if v != current_counts.get(k, 1) and k in new_active_slots}
-        if count_changes:
-            changes.append("multi-slots")
-        theme_changes = {k: v for k, v in new_theme_map.items()
-                         if v != current_theme.get(k)}
-        if theme_changes:
-            changes.append("themes")
 
-        if changes:
-            st.markdown(
-                f'<p style="color:#fdba74;font-size:0.82rem;margin:0.5rem 0;">'
-                f'Unsaved changes: {", ".join(changes)}</p>',
-                unsafe_allow_html=True,
+    with col_reset:
+        reset_clicked = st.button(
+            "Reset to Defaults",
+            key="editor_reset_all",
+            use_container_width=True,
+        )
+
+    with col_delete:
+        if not st.session_state.editor_confirm_delete:
+            delete_clicked = st.button(
+                "Delete Client",
+                key="editor_delete_client",
+                use_container_width=True,
             )
+            if delete_clicked:
+                st.session_state.editor_confirm_delete = True
+                st.rerun()
+        else:
+            st.warning(f"Delete **{selected_client}**? This cannot be undone.")
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("Confirm Delete", type="primary", key="editor_confirm_del_btn"):
+                    try:
+                        api.delete_client(selected_client)
+                        st.session_state.editor_confirm_delete = False
+                        st.session_state.pop('editor_client_select', None)
+                        st.toast(f"Deleted {selected_client}", icon="✓")
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Delete failed: {e}")
+            with c2:
+                if st.button("Cancel", key="editor_cancel_del_btn"):
+                    st.session_state.editor_confirm_delete = False
+                    st.rerun()
 
+    # --- Handle Save ---
     if save_clicked:
         payload = {}
-
-        # Slots changed?
         if set(new_active_slots) != set(current_active):
             payload['active_base_slots'] = new_active_slots
-
-        # Slot counts changed?
         count_overrides = {k: v for k, v in new_slot_counts.items()
                           if k in new_active_slots}
         payload['slot_counts'] = count_overrides
-
-        # Theme changed?
         payload['theme_map'] = new_theme_map
-
         try:
             api.update_client_config(selected_client, payload)
             st.toast(f"Saved configuration for {selected_client}", icon="✓")
             st.rerun()
         except Exception as e:
             st.error(f"Save failed: {e}")
+
+    # --- Handle Reset ---
+    if reset_clicked:
+        payload = {
+            'active_base_slots': list(all_base_slots),
+            'slot_counts': {s: 1 for s in all_base_slots},
+            'theme_map': dict(default_theme_map),
+        }
+        try:
+            api.update_client_config(selected_client, payload)
+            st.toast(f"Reset {selected_client} to defaults", icon="✓")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Reset failed: {e}")
