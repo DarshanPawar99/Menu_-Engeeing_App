@@ -21,6 +21,7 @@ os.chdir(_APP_DIR)
 import datetime as dt
 import io
 import csv
+import logging
 import threading
 import time
 
